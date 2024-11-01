@@ -7,8 +7,6 @@
     <meta name="color-scheme" content="light dark">
     <link rel="stylesheet" href="css/pico.min.css">
     <script defer src="js/alpinejs.min.js"></script>
-    <script defer src="js/qrcode.js"></script>
-    <script src="js/html5-qrcode.min.js"></script>
     <title>Рулетка</title>
 </head>
 <style>
@@ -25,12 +23,23 @@
     }
 
     .roullete-container div {
-        text-align: center;
+        border: 0.1rem solid;
         margin-top: 0.5rem;
         padding-bottom: 0.25rem;
         padding-top: 0.25rem;
-        font-size: 2rem;
-        border: 0.1rem solid;
+        height: 4rem;
+        overflow: hidden;
+        text-overflow: clip;
+    }
+
+    .roullete-container div p {
+        height: 2rem;
+        line-height: 3rem;
+        font-size: 1.5rem;
+    }
+
+    .roullete-container img {
+        max-height: 100%;
     }
 
     .centering {
@@ -40,6 +49,10 @@
     }
 
     .selected {
+        color: blue;
+    }
+
+    .selected p {
         color: blue;
     }
 </style>
@@ -53,23 +66,16 @@
                     Введите не менее <strong>четырёх</strong> вариантов. По одному варианту на строку.
                 </p>
                 <textarea x-ref="settingsVariantsText" style="min-height: 20rem;"></textarea>
-                <div style="display: none;" id="settingsQrCode"></div>
+                URL для загрузки:
+                <fieldset role="group">
+                    <input x-ref="settingsUrl">
+                    <input x-on:click="applySettingsUrl()" type="submit" value="Загрузить" />
+                </fieldset>
                 <footer>
                     <button x-on:click="showSettings = false" class="secondary">
                         Отмена
                     </button>
                     <button x-on:click="applySettings()">Применить</button>
-                    <button x-on:click="generateQRCode()">QR код</button>
-                </footer>
-            </article>
-        </dialog>
-
-        <dialog x-bind:open="showQRScan">
-            <article>
-                <h2>Считать настройки</h2>
-                <div class="centering" style="width: 500px" id="settingsQRReader"></div>
-                <footer>
-                    <button x-on:click="showQRScan = false" class="secondary">Закрыть</button>
                 </footer>
             </article>
         </dialog>
@@ -80,13 +86,14 @@
             </ul>
             <ul>
                 <li><a x-on:click="openSettings()" href="#">Настроить</a></li>
-                <li><a x-on:click="showQRScan = true" href="#">Считать настройки</a></li>
             </ul>
         </nav>
         <h1 class="centering">Рулетка</h1>
         <div class='roullete-container'>
             <template x-for="(text, idx) in variants">
-                <div x-bind:class="idx == 2 ? 'selected' : ''" x-text="text"></div>
+                <div x-bind:class="idx == 2 ? 'selected' : ''">
+                    <p x-html="text"></p>
+                </div>
             </template>
         </div>
         <div style="margin-top: 1rem;" class="centering">
@@ -96,14 +103,7 @@
     </main>
 </body>
 <script>
-    const variants = [
-        'Пункт 1',
-        'Пункт 2',
-        'Пункт 3',
-        'Пункт 4',
-        'Пункт 5',
-        'Пункт 6',
-    ];
+    const variants = [];
     let offset = 0;
 
     function makeSpinFn(htmlElements, variants) {
@@ -114,7 +114,7 @@
                 if (pos < 0) {
                     pos += variants.length;
                 }
-                htmlElements[pos].textContent = el;
+                htmlElements[pos].innerHTML = el;
             });
             offset++;
             if (offset >= variants.length) {
@@ -127,31 +127,6 @@
         return Math.floor(Math.random() * max);
     }
 
-    function serializeVariants(variants) {
-        return variants.join("\n");
-    }
-
-    function unserializeVariants(str) {
-        return str.split("\n");
-    }
-
-    function createQrCode(targetId, data) {
-        const target = document.getElementById(targetId);
-        target.innerHTML = '';
-        var qrcode = new QRCode(targetId, {
-            text: data,
-            width: 128,
-            height: 128,
-            colorDark: "#000000",
-            colorLight: "#ffffff",
-            correctLevel: QRCode.CorrectLevel.H
-        });
-        setTimeout(() => {
-            qrcode._oDrawing._elImage.style.display = '';
-            target.style.display = '';
-        }, 100);
-    }
-
     document.addEventListener('alpine:init', () => {
         Alpine.data('roullete', () => ({
             variants: variants,
@@ -160,14 +135,21 @@
             timerId: null,
             showSettings: false,
             showQRScan: false,
-            init() {
-                const html5QrcodeScanner = new Html5QrcodeScanner('settingsQRReader', { fps: 10, qrbox: 250 });
-                html5QrcodeScanner.render(this.onScanSuccess);
-            },
-            onScanSuccess(decodedText, decodedResult) {
-                this.$refs.settingsVariantsText.value = decodedText;
-                this.showQRScan = false;
-                this.showSettings = true;
+            async init() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const settingsUrl = urlParams.get('url');
+                if (!settingsUrl) {
+                    return;
+                }
+                const url = URL.parse(settingsUrl);
+                if (url === null) {
+                    console.log('invalid url', settingsUrl);
+                    return;
+                }
+                const loaded = await this.loadSettingsFromUrl(url.href);
+                if (loaded) {
+                    this.variants = loaded.split("\n");
+                }
             },
             spinWithInterval(fn, interval, count) {
                 return new Promise((resolve, reject) => {
@@ -185,13 +167,39 @@
             settingsTextToArray() {
                 return this.$refs.settingsVariantsText.value.split("\n");
             },
-            applySettings() {
-                const settingsVariants = settingsTextToArray();
+            async applySettings() {
+                const settingsVariants = this.settingsTextToArray();
+
                 if (settingsVariants.length < 4) {
                     return;
                 }
                 this.variants = settingsVariants;
                 this.showSettings = false;
+            },
+            async applySettingsUrl() {
+                url = url || this.$refs.settingsUrl.value;
+                if (!url) {
+                    // todo validate url
+                    return;
+                }
+
+                this.$refs.settingsVariantsText.value = await this.loadSettingsFromUrl(url);
+            },
+            async loadSettingsFromUrl(url) {
+                const resp = await fetch(url);
+                if (resp.status !== 200) {
+                    console.log('failed fetch');
+                }
+
+                if (
+                    !resp.headers.get('content-type').includes('text/plain')
+                    || parseInt(resp.headers.get('content-length')) >= 1024 * 1024
+                ) {
+                    console.log('validation failed');
+                    return;
+                }
+
+                return await resp.text();
             },
             openSettings() {
                 this.$refs.settingsVariantsText.value = this.variants.join("\n");
@@ -204,20 +212,17 @@
 
                 this.canSpin = false;
 
-                const elements = document.querySelectorAll('.roullete-container div');
+                const elements = document.querySelectorAll('.roullete-container div p');
                 const spinFn = makeSpinFn(elements, this.variants);
 
                 const rand = getRandomInt(this.variants.length);
 
-                await this.spinWithInterval(spinFn, 50, this.variants.length * 3 + rand);
-                await this.spinWithInterval(spinFn, 100, 10);
-                await this.spinWithInterval(spinFn, 200, 10);
+                await this.spinWithInterval(spinFn, 50, this.variants.length * 4 + rand);
+                await this.spinWithInterval(spinFn, 100, 10 + rand);
+                await this.spinWithInterval(spinFn, 200, 10 + rand);
 
                 this.canSpin = true;
             },
-            generateQRCode() {
-                createQrCode('settingsQrCode', serializeVariants(this.settingsTextToArray()));
-            }
         }));
     });
 </script>
